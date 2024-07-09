@@ -27,6 +27,7 @@
 
 #include <aws/core/Aws.h>
 #include <aws/core/auth/AWSCredentialsProvider.h>
+#include <aws/core/auth/STSAssumeRoleWebIdentityCredentialsProvider.h>
 
 #include "common.h"
 
@@ -109,29 +110,38 @@ S3Credential::S3Credential()
   const char* secret_key = std::getenv("AWS_SECRET_ACCESS_KEY");
   const char* key_id = std::getenv("AWS_ACCESS_KEY_ID");
   const char* region = std::getenv("AWS_DEFAULT_REGION");
+  const char* role_arn = std::getenv("AWS_ROLE_ARN");
   const char* session_token = std::getenv("AWS_SESSION_TOKEN");
   const char* profile = std::getenv("AWS_PROFILE");
+  const char* web_identity_token = std::getenv("AWS_WEB_IDENTITY_TOKEN");
   secret_key_ = to_str(secret_key);
   key_id_ = to_str(key_id);
   region_ = to_str(region);
+  role_arn_ = to_str(role_arn);
   session_token_ = to_str(session_token);
   profile_name_ = to_str(profile);
+  web_identity_token_ = to_str(web_identity_token);
 }
 
 S3Credential::S3Credential(triton::common::TritonJson::Value& cred_json)
 {
-  triton::common::TritonJson::Value secret_key_json, key_id_json, region_json,
-      session_token_json, profile_json;
+  triton::common::TritonJson::Value secret_key_json, key_id_json,
+      region_json, role_arn_json, session_token_json, profile_json,
+      web_identity_token_file_json;
   if (cred_json.Find("secret_key", &secret_key_json))
     secret_key_json.AsString(&secret_key_);
   if (cred_json.Find("key_id", &key_id_json))
     key_id_json.AsString(&key_id_);
   if (cred_json.Find("region", &region_json))
     region_json.AsString(&region_);
+  if (cred_json.Find("role_arn", &role_arn_json))
+    role_arn_json.AsString(&role_arn_);
   if (cred_json.Find("session_token", &session_token_json))
     session_token_json.AsString(&session_token_);
   if (cred_json.Find("profile", &profile_json))
     profile_json.AsString(&profile_name_);
+  if (cred_json.Find("web_identity_token_file", &web_identity_token_file_json))
+    web_identity_token_file_json.AsString(&web_identity_token_file_);
 }
 
 class S3FileSystem : public FileSystem {
@@ -287,6 +297,7 @@ S3FileSystem::S3FileSystem(
 
   Aws::Client::ClientConfiguration config;
   Aws::Auth::AWSCredentials credentials;
+  Aws::Auth::STSAssumeRoleWebIdentityCredentialsProvider provider;
 
   // check vars for S3 credentials -> aws profile -> default
   if (!s3_cred.secret_key_.empty() && !s3_cred.key_id_.empty()) {
@@ -301,6 +312,10 @@ S3FileSystem::S3FileSystem(
     }
   } else if (!s3_cred.profile_name_.empty()) {
     config = Aws::Client::ClientConfiguration(s3_cred.profile_name_.c_str());
+  } else if (!s3_cred.web_identity_token_file_.empty() &&
+      !s3_cred.role_arn_.empty()) {
+    provider = Aws::Auth::STSAssumeRoleWebIdentityCredentialsProvider();
+    config = Aws::Client::ClientConfiguration("default");
   } else {
     config = Aws::Client::ClientConfiguration("default");
   }
@@ -324,6 +339,14 @@ S3FileSystem::S3FileSystem(
   if (!s3_cred.secret_key_.empty() && !s3_cred.key_id_.empty()) {
     client_ = std::make_unique<s3::S3Client>(
         credentials, config,
+        Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never,
+        /*useVirtualAdressing*/ false);
+  } else if (!s3_cred.web_identity_token_file_.empty() &&
+      !s3_cred.role_arn_.empty()) {
+    shared_provider = std::make_shared<Aws::Auth::AWSCredentialsProvider>(
+        provider);
+    client_ = std::make_unique<s3::S3Client>(
+        shared_provider, config,
         Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never,
         /*useVirtualAdressing*/ false);
   } else {
